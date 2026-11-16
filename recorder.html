@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghi âm &amp; phát lại</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system, system-ui, sans-serif; background:#141416; color:#e8e8ea; min-height:100vh; }
+  .wrap { display:flex; gap:12px; padding:16px; min-height:100vh; }
+  .left { flex:1; display:flex; flex-direction:column; gap:8px; overflow-y:auto; }
+  .right { width:110px; display:flex; flex-direction:column; align-items:center; gap:10px; position:sticky; top:16px; align-self:flex-start; }
+  h1 { font-size:16px; font-weight:600; margin:0 0 4px; color:#aaa; }
+  .empty { color:#666; font-size:14px; padding:8px 0; }
+  .item { display:flex; align-items:center; gap:10px; background:#1f1f23; border:1px solid #34343a; border-radius:12px;
+    padding:14px; font-size:17px; color:#e8e8ea; cursor:pointer; width:100%; text-align:left; }
+  .item .num { width:30px; height:30px; border-radius:50%; background:#2c2c33; display:flex; align-items:center; justify-content:center; font-size:14px; flex:none; }
+  .item .dur { margin-left:auto; color:#888; font-size:14px; }
+  .item.playing { background:#2a2f45; border-color:#6f8cff; }
+  .item.playing .num { background:#6f8cff; color:#fff; }
+  .rec { width:84px; height:84px; border-radius:50%; border:4px solid #e8e8ea; background:transparent; display:flex; align-items:center; justify-content:center; cursor:pointer; padding:0; }
+  .rec .dot { width:56px; height:56px; border-radius:50%; background:#ff3b30; transition:all .2s; }
+  .rec.on .dot { width:30px; height:30px; border-radius:6px; }
+  .timer { font-variant-numeric:tabular-nums; font-size:16px; color:#ff6b62; min-height:20px; }
+  .hint { font-size:12px; color:#777; text-align:center; }
+  .err { font-size:12px; color:#ffb4a8; text-align:center; }
+  .alt { font-size:12px; color:#9fc8ff; text-align:center; text-decoration:underline; cursor:pointer; background:none; border:none; }
+  input[type=file] { display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="left">
+    <h1>Bản ghi</h1>
+    <div id="list"><div class="empty">Chưa có bản ghi nào.</div></div>
+  </div>
+  <div class="right">
+    <button class="rec" id="rec" aria-label="Ghi âm"><span class="dot"></span></button>
+    <div class="timer" id="timer"></div>
+    <div class="hint" id="hint">Bấm để ghi, bấm lại để dừng</div>
+    <div class="err" id="err"></div>
+    <button class="alt" id="altBtn" hidden>Chọn / ghi bằng ứng dụng khác</button>
+    <input type="file" id="file" accept="audio/*" capture multiple>
+  </div>
+</div>
+<script>
+const recBtn = document.getElementById('rec');
+const timerEl = document.getElementById('timer');
+const listEl = document.getElementById('list');
+const errEl = document.getElementById('err');
+const altBtn = document.getElementById('altBtn');
+const fileIn = document.getElementById('file');
+const clips = [];
+let mr = null, stream = null, chunks = [], t0 = 0, tick = null;
+const player = new Audio();
+let current = -1;
+
+function fmt(s){ s = Math.max(0, Math.round(s)); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); }
+
+function render(){
+  listEl.innerHTML = '';
+  if (!clips.length) { listEl.innerHTML = '<div class="empty">Chưa có bản ghi nào.</div>'; return; }
+  clips.forEach((c,i)=>{
+    const b = document.createElement('button');
+    b.className = 'item' + (i===current ? ' playing' : '');
+    b.innerHTML = '<span class="num">'+(i+1)+'</span><span>Bản ghi '+(i+1)+'</span><span class="dur">'+(c.dur!=null?fmt(c.dur):'')+'</span>';
+    b.onclick = ()=>play(i);
+    listEl.appendChild(b);
+  });
+}
+
+function play(i){
+  try { player.pause(); } catch(e){}
+  current = i; render();
+  player.src = clips[i].url;
+  player.currentTime = 0;
+  player.play().catch(()=>{ current=-1; render(); });
+}
+player.onended = ()=>{ current = -1; render(); };
+
+function addClip(blob, dur){
+  const url = URL.createObjectURL(blob);
+  const c = {url, dur};
+  clips.push(c);
+  if (dur == null) {
+    const a = new Audio(); a.preload='metadata'; a.src = url;
+    a.onloadedmetadata = ()=>{ if (isFinite(a.duration)) { c.dur = a.duration; render(); } };
+  }
+  render();
+}
+
+function pickMime(){
+  const opts = ['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/aac'];
+  if (window.MediaRecorder && MediaRecorder.isTypeSupported) for (const m of opts) if (MediaRecorder.isTypeSupported(m)) return m;
+  return '';
+}
+
+async function start(){
+  errEl.textContent = '';
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) throw new Error('unsupported');
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  } catch(e) {
+    errEl.textContent = 'Không truy cập được micro ở đây.';
+    altBtn.hidden = false;
+    return;
+  }
+  chunks = [];
+  const mime = pickMime();
+  mr = mime ? new MediaRecorder(stream, {mimeType:mime}) : new MediaRecorder(stream);
+  mr.ondataavailable = e=>{ if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = ()=>{
+    const dur = (Date.now()-t0)/1000;
+    const blob = new Blob(chunks, {type: mr.mimeType || 'audio/mp4'});
+    stream.getTracks().forEach(t=>t.stop());
+    addClip(blob, dur);
+  };
+  mr.start();
+  t0 = Date.now();
+  recBtn.classList.add('on');
+  timerEl.textContent = '0:00';
+  tick = setInterval(()=>{ timerEl.textContent = fmt((Date.now()-t0)/1000); }, 250);
+}
+
+function stop(){
+  if (mr && mr.state !== 'inactive') mr.stop();
+  clearInterval(tick); timerEl.textContent = '';
+  recBtn.classList.remove('on');
+}
+
+recBtn.onclick = ()=>{ (mr && mr.state === 'recording') ? stop() : start(); };
+altBtn.onclick = ()=> fileIn.click();
+fileIn.onchange = ()=>{ [...fileIn.files].forEach(f=>addClip(f, null)); fileIn.value=''; };
+</script>
+</body>
+</html>
